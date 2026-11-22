@@ -107,6 +107,23 @@ cmake --install build/linux --prefix dist/linux
 
 To run the optional test suite, make sure Python 3 is available, configure the build with `-DBUILD_TESTING=ON` and rebuild. Run `ctest --test-dir build/win -C Release --output-on-failure` on Windows or `ctest --test-dir build/linux --output-on-failure` on Linux. The suite loads the built module and uses temporary resource files. It checks that 32 downloads can receive headers before the first transfers finish, that a queued connection proceeds when a slot becomes available, and that the plugin can unload with downloads still open.
 
+## Preparing a release
+
+1. Set the release version in the `project(... VERSION ...)` line of `CMakeLists.txt` and push the commit you want to release.
+2. In GitHub, open **Actions → Prepare draft release → Run workflow** and select the branch. Alternatively, push a tag matching the CMake version, such as `v1.5.1`, to start the same workflow automatically.
+3. When both builds finish, open the draft from the workflow summary or the repository's **Releases** page. Review the generated notes and click **Publish release** when ready.
+
+The workflow builds a Windows x86 DLL and a Linux i386 shared object targeting glibc 2.28. The installation ZIP contains `fastdl_mm.dll`, `fastdl_mm.so` and `fastdl.ini` under `addons/fastdl/`. The release includes `THIRD-PARTY-NOTICES.txt` as a separate attachment. Rerunning the workflow for the same commit and version refreshes the draft's attachments and retains any edits to its notes. Published versions are skipped.
+
+To assemble the same ZIP locally, install both Release builds into one staging directory and run the packaging script. Adjust the build paths and version to match your builds.
+
+```sh
+cmake --install build/win --config Release --prefix build/stage
+cmake --install build/linux --config Release --prefix build/stage
+python scripts/package_release.py build/stage dist/GoldSrc-FastDL-1.5.1-x86.zip
+cmake --install build/linux --config Release --component Notices --prefix dist
+```
+
 ## Project layout and references
 
 - `src/metamod/` handles plugin loading and unloading and manages `sv_downloadurl`.

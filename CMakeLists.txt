@@ -43,9 +43,14 @@ else()
 endif()
 install(TARGETS fastdl_mm LIBRARY DESTINATION addons/fastdl RUNTIME DESTINATION addons/fastdl)
 install(FILES config/fastdl.ini DESTINATION addons/fastdl)
-install(FILES "${boost_headers_SOURCE_DIR}/LICENSE_1_0.txt" DESTINATION addons/fastdl/licenses RENAME Boost.txt)
-install(FILES "${metamod_SOURCE_DIR}/LICENSE" DESTINATION addons/fastdl/licenses RENAME Metamod-R.txt)
-install(FILES README.md DESTINATION addons/fastdl)
+
+# Ship dependency notices alongside the release ZIP as a separate download.
+file(READ "${boost_headers_SOURCE_DIR}/LICENSE_1_0.txt" boost_license)
+file(READ "${metamod_SOURCE_DIR}/LICENSE" metamod_license)
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/THIRD-PARTY-NOTICES.txt"
+  CONTENT "Boost\n\n@boost_license@\n\nMetamod-R SDK\n\n@metamod_license@" @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/THIRD-PARTY-NOTICES.txt"
+  DESTINATION . COMPONENT Notices EXCLUDE_FROM_ALL)
 
 option(BUILD_TESTING "Build the optional Metamod test host" OFF)
 include(CTest)

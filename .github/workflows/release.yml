@@ -1,0 +1,135 @@
+name: Prepare draft release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name != 'push' || !github.event.deleted
+    strategy:
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure Windows x86
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -A Win32 -DBUILD_TESTING=OFF
+
+      - name: Configure Linux i386 (glibc 2.28)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/zig.tar.xz"
+          curl --fail --location --retry 3 --output "$archive" https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+          echo "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  $archive" | sha256sum --check
+          tar -xf "$archive" -C "$RUNNER_TEMP"
+          export CXX="$RUNNER_TEMP/zig-x86_64-linux-0.14.1/zig c++ -target x86-linux-gnu.2.28"
+          cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/linux-x86.cmake \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_MODULE_LINKER_FLAGS_RELEASE=-s -DCMAKE_SKIP_RPATH=ON -DBUILD_TESTING=OFF
+
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt | tr -d '\r')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match the CMake version v$version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build and stage the plugin
+        shell: bash
+        run: |
+          cmake --build build --config Release --target fastdl_mm --parallel 2
+          cmake --install build --config Release --prefix stage
+
+      - name: Stage third-party notices
+        if: runner.os == 'Linux'
+        run: cmake --install build --config Release --component Notices --prefix stage
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-${{ runner.os }}
+          path: stage/
+          if-no-files-found: error
+          overwrite: true
+
+  draft:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: draft-release-${{ needs.build.outputs.version }}
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: runtime-*
+          path: artifacts
+
+      - name: Assemble installation ZIP
+        run: |
+          stage=artifacts/runtime-Linux
+          cp artifacts/runtime-Windows/addons/fastdl/fastdl_mm.dll "$stage/addons/fastdl/"
+          python3 scripts/package_release.py "$stage" "dist/GoldSrc-FastDL-$VERSION-x86.zip"
+          cp "$stage/THIRD-PARTY-NOTICES.txt" dist/
+
+      - name: Prepare draft and attach files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          commit=$(git rev-parse HEAD)
+          tag_commit=$(git rev-parse --verify --quiet "refs/tags/$tag^{commit}" || true)
+          if [[ -n "$tag_commit" && "$tag_commit" != "$commit" ]]; then
+            echo "::error::Tag $tag already points to a different commit"
+            exit 1
+          fi
+          assets=("dist/GoldSrc-FastDL-$VERSION-x86.zip" dist/THIRD-PARTY-NOTICES.txt)
+          existing=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" | jq -r --arg tag "$tag" \
+            '.[] | select(.tag_name == $tag) | [.draft, .target_commitish] | @tsv')
+          if [[ -z "$existing" ]]; then
+            gh release create "$tag" "${assets[@]}" --draft --target "$commit" \
+              --title "GoldSrc FastDL $VERSION" --generate-notes
+          else
+            IFS=$'\t' read -r draft target <<< "$existing"
+            if [[ "$draft" != true ]]; then
+              echo "::notice::Release $tag has already been published. Skipping the upload."
+              exit 0
+            fi
+            if [[ -z "$tag_commit" && "$target" != "$commit" ]]; then
+              branch_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$target^{commit}" || true)
+              if [[ "$branch_commit" != "$commit" ]]; then
+                echo "::error::The existing draft targets $target instead of $commit"
+                exit 1
+              fi
+              gh release edit "$tag" --target "$commit"
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          fi
+          url=$(gh release view "$tag" --json url --jq .url)
+          echo "[Review and publish the draft]($url)" >> "$GITHUB_STEP_SUMMARY"
